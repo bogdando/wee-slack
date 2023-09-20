@@ -3,6 +3,7 @@
 # Copyright (c) 2015-2023 Trygve Aaberge <trygveaa@gmail.com>
 # Released under the MIT license.
 
+#!/usr/bin/env python
 from __future__ import print_function, unicode_literals
 
 from collections import OrderedDict, namedtuple
@@ -450,6 +451,7 @@ def handle_socket_error(exception, team, caller_name):
         "Socket failed on {} with exception:\n{}".format(caller_name, format_exc_tb()),
         level=5,
     )
+    time.sleep(120000)
     team.set_disconnected()
 
 
@@ -679,7 +681,7 @@ class EventRouter(object):
                 name, value = header.split(":", 1)
                 if name.lower() == "retry-after":
                     retry_after = int(value.strip())
-                    request_metadata.retry_time = time.time() + retry_after
+                    request_metadata.retry_time = time.time() + str(10*retry_after) + "s"
                     return "", "ratelimited"
 
         return body, ""
