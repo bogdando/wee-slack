@@ -1,0 +1,3 @@
+plyvel
+pycrypto
+keyring

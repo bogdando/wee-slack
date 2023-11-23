@@ -12,7 +12,7 @@ from configparser import ConfigParser
 from contextlib import contextmanager
 from pathlib import Path
 from sqlite3 import OperationalError
-from typing import TYPE_CHECKING, Literal, assert_never
+from typing import TYPE_CHECKING, Literal 
 
 if TYPE_CHECKING:
     from _typeshed import StrPath
@@ -265,17 +265,20 @@ elif browser == "chrome":
         db = DB(str(leveldb_path))
         local_storage_value = db.get(leveldb_key)
     except pIOErr:
-        with tempfile.TemporaryDirectory(
-            dir=local_storage_path, prefix="leveldb-", suffix=".tmp"
-        ) as tmp_dir:
-            shutil.copytree(leveldb_path, tmp_dir, dirs_exist_ok=True)
-            db = DB(tmp_dir)
-            local_storage_value = db.get(leveldb_key)
+        try:
+            with tempfile.TemporaryDirectory(
+                dir=local_storage_path, prefix="leveldb-", suffix=".tmp"
+            ) as tmp_dir:
+                shutil.copytree(leveldb_path, tmp_dir, dirs_exist_ok=True)
+                db = DB(tmp_dir)
+                local_storage_value = db.get(leveldb_key)
+        except OSError:
+            pass
 
     local_config = json.loads(local_storage_value[1:]) if local_storage_value else None
 
 else:
-    assert_never(browser)
+    pass
 
 if cookie_ds_value:
     cookie_value = f"d={cookie_d_value};d-s={cookie_ds_value}"
