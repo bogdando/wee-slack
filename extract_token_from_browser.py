@@ -279,18 +279,21 @@ elif browser == "chrome":
         local_storage_value = db.get(leveldb_key)
         db.close()
     except pIOErr:
-        with tempfile.TemporaryDirectory(
-            dir=local_storage_path, prefix="leveldb-", suffix=".tmp"
-        ) as tmp_dir:
-            shutil.copytree(leveldb_path, tmp_dir, dirs_exist_ok=True)
-            db = DB(tmp_dir)
-            local_storage_value = db.get(leveldb_key)
-            db.close()
+        try:
+            with tempfile.TemporaryDirectory(
+                dir=local_storage_path, prefix="leveldb-", suffix=".tmp"
+            ) as tmp_dir:
+                shutil.copytree(leveldb_path, tmp_dir, dirs_exist_ok=True)
+                db = DB(tmp_dir)
+                local_storage_value = db.get(leveldb_key)
+                db.close()
+        except OSError:
+            pass
 
     local_config = json.loads(local_storage_value[1:]) if local_storage_value else None
 
 else:
-    assert_never(browser)
+    pass
 
 if cookie_ds_value:
     cookie_value = f"d={cookie_d_value};d-s={cookie_ds_value}"
