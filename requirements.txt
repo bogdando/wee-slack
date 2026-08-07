@@ -1,5 +1,4 @@
 plyvel
-pycrypto
 keyring
 secretstorage
 snappy

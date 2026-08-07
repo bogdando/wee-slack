@@ -26,20 +26,14 @@ class AESCipher:
         self.key = key
 
     def decrypt(self, text):
-        # Use AES-128-CBC with fixed IV for both v10 and v11 on Linux
         cipher = AES.new(self.key, AES.MODE_CBC, IV=(b" " * 16))
         decrypted = cipher.decrypt(text)
-        # Remove PKCS7 padding
         padding_len = decrypted[-1]
-        if padding_len < 16:
+        if (
+            0 < padding_len <= 16
+            and decrypted.endswith(bytes([padding_len]) * padding_len)
+        ):
             decrypted = decrypted[:-padding_len]
-        # For v11, the first 28 bytes are garbage (nonce+tag treated as ciphertext)
-        # Find the actual cookie data starting with 'xoxd' or 'd='
-        for marker in [b"xoxd", b"d="]:
-            pos = decrypted.find(marker)
-            if pos >= 0:
-                return decrypted[pos:]
-        # If no marker found, return as-is (might be v10 format without garbage)
         return decrypted
 
 
@@ -50,6 +44,91 @@ def sqlite3_connect(path: StrPath):
         yield con
     finally:
         con.close()
+
+
+def strip_chrome_cookie_prefix(
+    decrypted: bytes, expected_markers: tuple[bytes, ...]
+) -> bytes:
+    for marker in expected_markers:
+        pos = decrypted.find(marker)
+        if pos >= 0:
+            return decrypted[pos:]
+
+    return decrypted
+
+
+def decode_chrome_cookie(
+    decrypted: bytes,
+    expected_markers: tuple[bytes, ...],
+    expected_prefix: str | None = None,
+) -> str:
+    value = uq(strip_chrome_cookie_prefix(decrypted, expected_markers).decode("utf-8"))
+    if (
+        (expected_prefix is not None and not value.startswith(expected_prefix))
+        or not value.isascii()
+        or not value.isprintable()
+    ):
+        raise ValueError("Decrypted Chrome cookie did not look valid")
+
+    return value
+
+
+def get_chrome_passwords() -> list[str | bytes]:
+    passwords: list[str | bytes] = []
+
+    def add_password(password: str | bytes | None):
+        if password is not None and password not in passwords:
+            passwords.append(password)
+
+    try:
+        import secretstorage
+        from secretstorage.exceptions import SecretStorageException
+
+        bus = secretstorage.dbus_init()
+
+        for application in ("chrome", "Chrome", "chromium", "Chromium"):
+            try:
+                for item in secretstorage.search_items(
+                    bus,
+                    {
+                        "xdg:schema": "chrome_libsecret_os_crypt_password_v2",
+                        "application": application,
+                    },
+                ):
+                    add_password(item.get_secret())
+            except SecretStorageException:
+                continue
+
+        seen_collections: set[str] = set()
+        collection_getters = (
+            secretstorage.get_default_collection,
+            secretstorage.get_any_collection,
+        )
+        for getter in collection_getters:
+            try:
+                collection = getter(bus)
+            except SecretStorageException:
+                continue
+
+            collection_path = str(getattr(collection, "collection_path", id(collection)))
+            if collection_path in seen_collections:
+                continue
+            seen_collections.add(collection_path)
+
+            try:
+                for item in collection.get_all_items():
+                    if item.get_label() in (
+                        "Chrome Safe Storage",
+                        "Chromium Safe Storage",
+                    ):
+                        add_password(item.get_secret())
+            except SecretStorageException:
+                continue
+    except Exception:
+        pass
+
+    add_password("peanuts")
+    return passwords
 
 
 def get_cookies(
@@ -234,8 +313,6 @@ if browser == "firefox":
         pass
 
 elif browser == "chrome":
-    import secretstorage
-
     try:
         from Cryptodome.Cipher import AES
         from Cryptodome.Protocol.KDF import PBKDF2
@@ -244,7 +321,6 @@ elif browser == "chrome":
         from Crypto.Protocol.KDF import PBKDF2
     from plyvel import DB
     from plyvel._plyvel import IOError as pIOErr
-    from secretstorage.exceptions import SecretStorageException
 
     if not profile:
         profile = "Default"
@@ -259,34 +335,52 @@ elif browser == "chrome":
     cookie_d_value, cookie_ds_value = get_cookies(cookies_path, cookie_query, ())
 
     if args.no_secretstorage:
-        passwd = "peanuts"
+        passwords = ["peanuts"]
     else:
-        bus = secretstorage.dbus_init()
-        try:
-            collection = secretstorage.get_default_collection(bus)
-            for item in collection.get_all_items():
-                if item.get_label() == "Chrome Safe Storage":
-                    passwd = item.get_secret()
-                    break
-            else:
-                raise Exception("Chrome password not found!")
-        except SecretStorageException:
-            print(
-                "Error communicating org.freedesktop.secrets, trying 'peanuts' "
-                "as a password",
-                file=sys.stderr,
-            )
-            passwd = "peanuts"
+        passwords = get_chrome_passwords()
 
     salt = b"saltysalt"
-    key = PBKDF2(passwd, salt, 16, chrome_key_iterations)
-    cipher = AESCipher(key)
+    last_error: Exception | None = None
+    for passwd in passwords:
+        key = PBKDF2(passwd, salt, 16, chrome_key_iterations)
+        cipher = AESCipher(key)
 
-    decrypted_d = cipher.decrypt(cookie_d_value[3:])
-    cookie_d_value = uq(decrypted_d.decode("utf-8"))
-    if cookie_ds_value:
-        decrypted_ds = cipher.decrypt(cookie_ds_value[3:])
-        cookie_ds_value = uq(decrypted_ds.decode("utf-8"))
+        try:
+            decrypted_d = cipher.decrypt(cookie_d_value[3:])
+            decoded_d = decode_chrome_cookie(
+                decrypted_d, (b"xoxd-", b"d="), expected_prefix="xoxd-"
+            )
+            decoded_ds = None
+            if cookie_ds_value:
+                decrypted_ds = cipher.decrypt(cookie_ds_value[3:])
+                decoded_ds = decode_chrome_cookie(decrypted_ds, (b"d-s=",))
+                if decoded_ds.startswith("d-s="):
+                    decoded_ds = decoded_ds[4:]
+        except (UnicodeDecodeError, ValueError) as error:
+            last_error = error
+            continue
+
+        cookie_d_value = decoded_d
+        cookie_ds_value = decoded_ds
+        break
+    else:
+        if args.no_secretstorage:
+            print(
+                "Unable to decrypt Chrome cookies with the legacy 'peanuts' "
+                "password.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Unable to decrypt Chrome cookies with any available keyring "
+                "password. This can happen after migrating between Linux "
+                "desktops or distros; re-unlock or re-save the Chrome Safe "
+                "Storage secret and try again.",
+                file=sys.stderr,
+            )
+        if last_error is not None:
+            print(last_error, file=sys.stderr)
+        sys.exit(1)
 
     local_storage_path = default_profile_path.joinpath("Local Storage")
     leveldb_path = local_storage_path.joinpath("leveldb")
